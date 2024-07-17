@@ -45,7 +45,7 @@ int main(int argc, char* argv[])
     char* tok, *ctx;
     unsigned long bits[32] = { 0, };
     int nbits, i;
-    int nrows = 0, nglyphs = 0, indx = 0, y_advance = 0;
+    int nrows = 0, nglyphs = 0, indx = 0, y_advance = 0, rightmost = 0;
     Glyph   glyphs[256];
 
     if (argc < 2)
@@ -104,20 +104,14 @@ int main(int argc, char* argv[])
                 {
                     nbits++;
                     bits[nrows] <<= 1;
-                    if (*tok == 'X')
+                    if (*tok == 'X' || *tok == 'x')
+                    {
                         bits[nrows] |= 1;
+                        if (nbits > rightmost)
+                            rightmost = nbits;
+                    }
                     tok = strtok_s(NULL, " ", &ctx);
                 }
-
-#if 0
-                // Strip the existing hex (if any) and replace it. tok now points to 
-                // the trailing "|*/" in the original line.
-                saved_line[tok - line + 3] = '\0';
-                fprintf(output, "%s", saved_line);
-                for (i = nbits; i > 0; i -= 8)
-                    fprintf(output, " 0x%02X,", (bits >> (i - 8)) & 0xFF);
-                fprintf(output, "\n");
-#endif
 
                 nrows++;
             }
@@ -165,7 +159,8 @@ int main(int argc, char* argv[])
             glyphs[nglyphs].index = indx;
             glyphs[nglyphs].width = nbits;
             glyphs[nglyphs].height = nrows;
-            glyphs[nglyphs].x_advance = nbits + 3;      // Arbitrary
+            //glyphs[nglyphs].x_advance = nbits + 3;      // Arbitrary
+            glyphs[nglyphs].x_advance = rightmost + 3;      // Arbitrary
             glyphs[nglyphs].dx = 3;                    // Arbitrary
             glyphs[nglyphs].dy = -(nrows + 3);         // Arbitrary
             nglyphs++;
@@ -179,6 +174,7 @@ int main(int argc, char* argv[])
 
             // Ready the bits array for the next glyph bitmap
             nrows = 0;
+            rightmost = 0;
             memset(bits, 0, 32 * 4);
         }
 
