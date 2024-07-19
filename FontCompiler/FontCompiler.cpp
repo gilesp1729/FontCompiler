@@ -35,6 +35,45 @@ typedef struct Glyph
     char charname[80];
 } Glyph;
 
+// Scaling factor for bitmap. Must be greater than 1.0f.
+const float factor = 2.0f;
+
+// Scale up an image by interpolation. Src image is 8-bit, up to 32x32. Dst image may be taller (32x64)
+void scale_image(float scale, int *nbits, int *nrows, unsigned char src_image[32][32], unsigned char dst_image[32][64])
+{
+    int dst_nbits, dst_nrows;
+
+    dst_nrows = *nrows * scale;
+    dst_nbits = *nbits * scale;
+
+    for (int row = 0; row < dst_nrows; row++)
+    {
+        int src_row = row / scale;
+        float row_frac = (row / scale) - src_row;
+        int next_row = src_row + 1;
+        if (next_row >= *nrows)
+            next_row = *nrows - 1;
+
+        for (int col = 0; col < dst_nbits; col++)
+        {
+            int src_col = col / scale;
+            float col_frac = (col / scale) - src_col;
+            int next_col = src_col + 1;
+            if (next_col >= *nbits)
+                next_col = *nbits - 1;
+
+            dst_image[col][row] =
+                src_image[src_col][src_row] * (1 - col_frac) * (1 - row_frac) +
+                src_image[next_col][src_row] * (col_frac) * (1 - row_frac) +
+                src_image[src_col][next_row] * (1 - col_frac) * (row_frac)+
+                src_image[next_col][next_row] * (col_frac) * (row_frac);
+        }
+    }
+    *nrows = dst_nrows;
+    *nbits = dst_nbits;
+}
+
+
 int main(int argc, char* argv[])
 {
     FILE* input;
@@ -43,9 +82,11 @@ int main(int argc, char* argv[])
     char line[160], saved_line[160];
     bool new_glyph = true;
     char* tok, *ctx;
-    unsigned long bits[32] = { 0, };
+    unsigned char src_image[32][32], dst_image[32][64];
+    unsigned long bits = 0;
     int nbits, i;
     int nrows = 0, nglyphs = 0, indx = 0, y_advance = 0, rightmost = 0;
+    int threshold = 0x80;
     Glyph   glyphs[256];
 
     if (argc < 2)
@@ -81,6 +122,10 @@ int main(int argc, char* argv[])
             new_glyph = true;
         }
 
+        nrows = 0;
+        rightmost = 0;
+        memset(src_image, 0, 32 * 32);
+
         while (line[0] == '/' && line[1] == '*' && line[2] == '|')
         {
             // Output the charname
@@ -102,14 +147,9 @@ int main(int argc, char* argv[])
                 nbits = 0;
                 while (*tok != '|')
                 {
-                    nbits++;
-                    bits[nrows] <<= 1;
                     if (*tok == 'X' || *tok == 'x')
-                    {
-                        bits[nrows] |= 1;
-                        if (nbits > rightmost)
-                            rightmost = nbits;
-                    }
+                        src_image[nbits][nrows] = 0xFF;
+                    nbits++;
                     tok = strtok_s(NULL, " ", &ctx);
                 }
 
@@ -128,6 +168,7 @@ int main(int argc, char* argv[])
             // At this point we can do any manipulations of the glyph bitmap
             // (scaling, etc)
 
+            scale_image(factor, &nbits, &nrows, src_image, dst_image);
 
             // Output the 8 4 2 1 ... line
             fprintf(output, "/*| ");
@@ -139,20 +180,34 @@ int main(int argc, char* argv[])
             for (int row = 0; row < nrows; row++)
             {
                 fprintf(output, "/*| ");
-
-                for (i = nbits; i > 0; i--)
+                bits = 0;
+                for (i = 0; i < nbits; i++)
                 {
-                    int bit = (bits[row] >> (i - 1)) & 0x1;
+                    //int bit = (bits[row] >> (i - 1)) & 0x1;
+                    int bit = dst_image[i][row] > threshold;
+                    bits <<= 1;
+                    bits |= bit;
                     if (bit == 0)
-                        fprintf(output, "%s ", (((i - 1) % 8) || i == 1) ? "." : ",");
+                    {
+                        fprintf(output, "%s ", (((i + 1) % 8) || i == nbits - 1) ? "." : ",");
+                    }
                     else
+                    {
+#if 1
                         fprintf(output, "X ");
+#else
+                        // Print the high nibble of the interpolated image for testing
+                        fprintf(output, "%X ", dst_image[i][row] >> 4);
+#endif
+                        if (i > rightmost)
+                            rightmost = i;
+                    }
                 }
 
                 // Output the hex for groups of 8 bits in the row
                 fprintf(output, "|*/");
                 for (i = nbits; i > 0; i -= 8)
-                    fprintf(output, " 0x%02X,", (bits[row] >> (i - 8)) & 0xFF);
+                    fprintf(output, " 0x%02X,", (bits >> (i - 8)) & 0xFF);
                 fprintf(output, "\n");
             }
 
@@ -160,9 +215,11 @@ int main(int argc, char* argv[])
             glyphs[nglyphs].width = nbits;
             glyphs[nglyphs].height = nrows;
             //glyphs[nglyphs].x_advance = nbits + 3;      // Arbitrary
-            glyphs[nglyphs].x_advance = rightmost + 3;      // Arbitrary
+            glyphs[nglyphs].x_advance = rightmost + 1 + 3;      // Arbitrary
             glyphs[nglyphs].dx = 3;                    // Arbitrary
-            glyphs[nglyphs].dy = -(nrows + 3);         // Arbitrary
+            glyphs[nglyphs].dy = -(nrows + 3);         // Restrict to width+3 if it's too big (push into descender)
+            if (glyphs[nglyphs].dy < -(nbits + 3))
+                glyphs[nglyphs].dy = -(nbits + 3);
             nglyphs++;
 
             // Accumulate the tallest character height
@@ -172,10 +229,10 @@ int main(int argc, char* argv[])
             // Index to next character glyph bitmap
             indx += nrows * nbits / 8;
 
-            // Ready the bits array for the next glyph bitmap
+            // Ready the image array for the next glyph bitmap
             nrows = 0;
             rightmost = 0;
-            memset(bits, 0, 32 * 4);
+            memset(src_image, 0, 32 * 32);
         }
 
         // Check for // introducing next glyph
@@ -201,6 +258,19 @@ int main(int argc, char* argv[])
     fprintf(output, "0x00};\n\n");
     fprintf(output, "const GFXglyph %sGlyphs[] PROGMEM = {\n", fontname);
 
+    // Pad the glyphs array out to 32 entries (0-31) with copies of glyph 0.
+    // This is for symbol fonts so they don't leave holes before the space
+    // character in text fonts.
+    if (nglyphs < 32)
+    {
+        for (i = nglyphs; i < 32; i++)
+        {
+            glyphs[i] = glyphs[0];
+            sprintf_s(glyphs[i].charname, "%d", i);
+        }
+        nglyphs = 32;
+    }
+
     // Write out the glyphs array 
     for (i = 0; i < nglyphs; i++)
     {
@@ -222,7 +292,7 @@ int main(int argc, char* argv[])
     fprintf(output, "const GFXfont %s PROGMEM = {\n", fontname);
     fprintf(output, "  (uint8_t *)%sBitmaps,\n", fontname);
     fprintf(output, "  (GFXglyph*)%sGlyphs,\n", fontname);
-    fprintf(output, "  0, %d, %d};\n", nglyphs, y_advance + 10);     // Arbitrary gap in y
+    fprintf(output, "  0, %d, %d};\n", nglyphs - 1, y_advance + 10);     // Arbitrary gap in y
     fclose(output);
 }
 
